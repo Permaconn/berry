@@ -16,6 +16,13 @@
 #include <stdio.h>
 #include <ctype.h>
 
+// Permaconn Hooks
+#if defined(PM_BERRY_HOOKS)
+int pm_berry_str_i2hex(bvm *vm);
+char *pm_lltoa(long long value, char *digits, int base);
+#endif
+// -------------------------------
+
 #define is_space(c)     ((c) == ' ' || (c) == '\t' || (c) == '\r' || (c) == '\n')
 #define is_digit(c)     ((c) >= '0' && (c) <= '9')
 #define skip_space(s)   while (is_space(*(s))) { ++(s); }
@@ -51,7 +58,11 @@ bstring* be_num2str(bvm *vm, bvalue *v)
 {
     char buf[25];
     if (var_isint(v)) {
+#if defined(PM_BERRY_HOOKS) && BE_INTGER_TYPE == 2
+        pm_lltoa(var_toint(v), buf, 10);
+#else
         sprintf(buf, BE_INT_FORMAT, var_toint(v));
+#endif
     } else if (var_isreal(v)) {
         sprintf(buf, "%g", var_toreal(v));
     } else {
@@ -82,7 +93,11 @@ static bstring* sim2str(bvm *vm, bvalue *v)
         break;
     case BE_INDEX:
     case BE_INT:
+#if defined(PM_BERRY_HOOKS) && BE_INTGER_TYPE == 2
+        pm_lltoa(var_toint(v), sbuf, 10);
+#else
         sprintf(sbuf, BE_INT_FORMAT, var_toint(v));
+#endif
         break;
     case BE_REAL:
         sprintf(sbuf, "%g", var_toreal(v));
@@ -794,7 +809,11 @@ be_native_module_attr_table(string) {
     be_native_module_function("count", str_count),
     be_native_module_function("split", str_split),
     be_native_module_function("find", str_find),
+#if defined(PM_BERRY_HOOKS) && BE_INTGER_TYPE == 2
+    be_native_module_function("hex", pm_berry_str_i2hex),
+#else
     be_native_module_function("hex", str_i2hex),
+#endif
     be_native_module_function("byte", str_byte),
     be_native_module_function("char", str_char),
     be_native_module_function("tolower", str_tolower),
