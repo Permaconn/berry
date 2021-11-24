@@ -230,6 +230,7 @@ typedef struct bntvmodule {
 
 /* native module definition macro */
 #ifndef __cplusplus
+
 #define be_define_native_module(_name, _init)           \
     const bntvmodule be_native_module(_name) = {        \
         .name = #_name,                                 \
@@ -237,7 +238,6 @@ typedef struct bntvmodule {
         .size = sizeof(_name##_attrs)                   \
                / sizeof(_name##_attrs[0]),              \
         .module = NULL,                                 \
-        .init = _init                                   \
     }
 #else
 #define be_define_native_module(_name, _init)           \
