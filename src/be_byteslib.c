@@ -1442,13 +1442,23 @@ be_local_closure(getbits,   /* name */
     1,                          /* has constants */
     ( &(const bvalue[ 5]) {     /* constants */
     /* K0   */  be_const_int(0),
+#if BE_USE_PRECOMPILED_OBJECT
     /* K1   */  be_nested_str(value_error),
     /* K2   */  be_nested_str(length_X20in_X20bits_X20must_X20be_X20between_X200_X20and_X2032),
+#else
+    /* K1   */  be_nested_string("value_error", 773297791, 11),
+    /* K2   */  be_nested_string("length in bits must be between 0 and 32", -1710458168, 39),
+#endif
     /* K3   */  be_const_int(3),
     /* K4   */  be_const_int(1),
     }),
+#if BE_USE_PRECOMPILED_OBJECT
     &be_const_str_getbits,
     &be_const_str_solidified,
+#else
+    (be_nested_const_str("getbits", -1200798317, 7)),
+    (be_nested_const_str("input", -103256197, 5)),
+#endif
     ( &(const binstruction[32]) {  /* code */
       0x180C0500,  //  0000  LE R3 R2 K0
       0x740E0002,  //  0001  JMPT R3 #0005
@@ -1502,13 +1512,23 @@ be_local_closure(setbits,   /* name */
     1,                          /* has constants */
     ( &(const bvalue[ 5]) {     /* constants */
     /* K0   */  be_const_int(0),
+#if BE_USE_PRECOMPILED_OBJECT
     /* K1   */  be_nested_str(value_error),
     /* K2   */  be_nested_str(length_X20in_X20bits_X20must_X20be_X20between_X200_X20and_X2032),
+#else
+    /* K1   */  be_nested_string("value_error", 773297791, 11),
+    /* K2   */  be_nested_string("length in bits must be between 0 and 32", -1710458168, 39),
+#endif
     /* K3   */  be_const_int(3),
     /* K4   */  be_const_int(1),
     }),
+#if BE_USE_PRECOMPILED_OBJECT
     &be_const_str_setbits,
     &be_const_str_solidified,
+#else
+    (be_nested_const_str("setbits", -1532559129, 7)),
+    (be_nested_const_str("input", -103256197, 5)),
+#endif
     ( &(const binstruction[37]) {  /* code */
       0x14100500,  //  0000  LT R4 R2 K0
       0x74120002,  //  0001  JMPT R4 #0005
