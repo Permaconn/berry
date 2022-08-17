@@ -18,8 +18,8 @@
 #include "be_func.h"
 #include "be_class.h"
 #include "be_decoder.h"
-#include "be_debug.h"
 #include "be_exec.h"
+#include <limits.h>
 
 #define OP_NOT_BINARY           TokenNone
 #define OP_NOT_UNARY            TokenNone
@@ -29,6 +29,17 @@
 
 #define FUNC_METHOD             1
 #define FUNC_ANONYMOUS          2
+
+#if BE_INTGER_TYPE == 0 /* int */
+  #define M_IMAX    INT_MAX
+  #define M_IMIN    INT_MIN
+#elif BE_INTGER_TYPE == 1 /* long */
+  #define M_IMAX    LONG_MAX
+  #define M_IMIN    LONG_MIN
+#else /* int64_t (long long) */
+  #define M_IMAX    LLONG_MAX
+  #define M_IMIN    LLONG_MIN
+#endif
 
 /* get binary operator priority */
 #define binary_op_prio(op)      (binary_op_prio_tab[cast_int(op) - OptAdd])
@@ -162,7 +173,7 @@ void end_varinfo(bparser *parser, int beginpc)
     if (beginpc == -1) /* use block->beginpc by default */
         beginpc = binfo->beginpc;
     /* skip the variable of the previous blocks */
-    for (; it->beginpc < beginpc; ++it);
+    for (; (it <= end) && (it->beginpc < beginpc); ++it);
     for (; it <= end; ++it) {
         if (!it->endpc) /* write to endpc only once */
             it->endpc = finfo->pc;
@@ -545,7 +556,7 @@ static void func_vararg(bparser *parser) {
     str = next_token(parser).u.s;
     match_token(parser, TokenId); /* match and skip ID */
     new_var(parser, str, &v); /* new variable */
-    parser->finfo->proto->varg = 1;   /* set varg flag */
+    parser->finfo->proto->varg |= BE_VA_VARARG;   /* set varg flag */
 }
 
 /* Parse function or method definition variable list */
@@ -594,6 +605,7 @@ static bproto* funcbody(bparser *parser, bstring *name, int type)
     finfo.proto->name = name;
     if (type & FUNC_METHOD) { /* If method, add an implicit first argument `self` */
         new_localvar(parser, parser_newstr(parser, "self"));
+        finfo.proto->varg |= BE_VA_METHOD;
     }
     func_varlist(parser); /* parse arg list */
     stmtlist(parser); /* parse statement without final `end` */
@@ -602,12 +614,12 @@ static bproto* funcbody(bparser *parser, bstring *name, int type)
     return finfo.proto; /* return fully constructed `bproto` */
 }
 
-/* anonymous function, build `bproto` object with name `<anonymous>` */
+/* anonymous function, build `bproto` object with name `_anonymous_` */
 /* and build a expdesc for the bproto */
 static void anon_func(bparser *parser, bexpdesc *e)
 {
     bproto *proto;
-    bstring *name = parser_newstr(parser, "<anonymous>");
+    bstring *name = parser_newstr(parser, "_anonymous_");
     /* 'def' ID '(' varlist ')' block 'end' */
     scan_next_token(parser); /* skip 'def' */
     proto = funcbody(parser, name, FUNC_ANONYMOUS);
@@ -877,6 +889,30 @@ static void primary_expr(bparser *parser, bexpdesc *e)
     }
 }
 
+/* parse a single string literal as parameter */
+static void call_single_string_expr(bparser *parser, bexpdesc *e)
+{
+    bexpdesc arg;
+    bfuncinfo *finfo = parser->finfo;
+    int base;
+
+    /* func 'string_literal' */
+    check_var(parser, e);
+    if (e->type == ETMEMBER) {
+        push_error(parser, "method not allowed for string prefix");
+    }
+    
+    base = be_code_nextreg(finfo, e); /* allocate a new base reg if not at top already */
+    simple_expr(parser, &arg);
+    be_code_nextreg(finfo, &arg);  /* move result to next reg */
+
+    be_code_call(finfo, base, 1);  /* only one arg */
+    if (e->type != ETREG) {
+        e->type = ETREG;
+        e->v.idx = base;
+    }
+}
+
 static void suffix_expr(bparser *parser, bexpdesc *e)
 {
     primary_expr(parser, e);
@@ -890,6 +926,9 @@ static void suffix_expr(bparser *parser, bexpdesc *e)
             break;
         case OptLSB: /* '[' index */
             index_expr(parser, e);
+            break;
+        case TokenString:
+            call_single_string_expr(parser, e); /* " string literal */
             break;
         default:
             return;
@@ -1047,7 +1086,11 @@ static void sub_expr(bparser *parser, bexpdesc *e, int prio)
         be_code_prebinop(finfo, op, e); /* and or */
         init_exp(&e2, ETVOID, 0);
         sub_expr(parser, &e2, binary_op_prio(op));  /* parse right side */
-        check_var(parser, &e2);  /* check if valid */
+        if ((e2.type == ETVOID) && (op == OptConnect)) {
+            init_exp(&e2, ETINT, M_IMAX);
+        } else {
+            check_var(parser, &e2);  /* check if valid */
+        }
         be_code_binop(finfo, op, e, &e2, -1); /* encode binary op */
         op = get_binop(parser);  /* is there a following binop? */
     }
@@ -1348,11 +1391,11 @@ static void classvar_stmt(bparser *parser, bclass *c)
     scan_next_token(parser); /* skip 'var' */
     if (match_id(parser, name) != NULL) {
         check_class_attr(parser, c, name);
-        be_member_bind(parser->vm, c, name, btrue);
+        be_class_member_bind(parser->vm, c, name, btrue);
         while (match_skip(parser, OptComma)) { /* ',' */
             if (match_id(parser, name) != NULL) {
                 check_class_attr(parser, c, name);
-                be_member_bind(parser->vm, c, name, btrue);
+                be_class_member_bind(parser->vm, c, name, btrue);
             } else {
                 parser_error(parser, "class var error");
             }
@@ -1379,31 +1422,7 @@ static void class_static_assignment_expr(bparser *parser, bexpdesc *e, bstring *
     }
 }
 
-static void classstatic_stmt(bparser *parser, bclass *c, bexpdesc *e)
-{
-    bstring *name;
-    /* 'static' ID ['=' expr] {',' ID ['=' expr] } */
-    scan_next_token(parser); /* skip 'static' */
-    if (match_id(parser, name) != NULL) {
-        check_class_attr(parser, c, name);
-        be_member_bind(parser->vm, c, name, bfalse);
-        class_static_assignment_expr(parser, e, name);
-
-        while (match_skip(parser, OptComma)) { /* ',' */
-            if (match_id(parser, name) != NULL) {
-                check_class_attr(parser, c, name);
-                be_member_bind(parser->vm, c, name, bfalse);
-                class_static_assignment_expr(parser, e, name);
-            } else {
-                parser_error(parser, "class static error");
-            }
-        }
-    } else {
-        parser_error(parser, "class static error");
-    }
-}
-
-static void classdef_stmt(bparser *parser, bclass *c)
+static void classdef_stmt(bparser *parser, bclass *c, bbool is_static)
 {
     bexpdesc e;
     bstring *name;
@@ -1412,9 +1431,41 @@ static void classdef_stmt(bparser *parser, bclass *c)
     scan_next_token(parser); /* skip 'def' */
     name = func_name(parser, &e, 1);
     check_class_attr(parser, c, name);
-    proto = funcbody(parser, name, FUNC_METHOD);
-    be_method_bind(parser->vm, c, proto->name, proto);
+    proto = funcbody(parser, name, is_static ? 0 : FUNC_METHOD);
+    be_class_method_bind(parser->vm, c, proto->name, proto, is_static);
     be_stackpop(parser->vm, 1);
+}
+
+static void classstatic_stmt(bparser *parser, bclass *c, bexpdesc *e)
+{
+    bstring *name;
+    /* 'static' ['var'] ID ['=' expr] {',' ID ['=' expr] } */
+    /* 'static' 'def' ID '(' varlist ')' block 'end' */
+    scan_next_token(parser); /* skip 'static' */
+    if (next_type(parser) == KeyDef) {  /* 'static' 'def' ... */
+        classdef_stmt(parser, c, btrue);
+    } else {
+        if (next_type(parser) == KeyVar) {
+            scan_next_token(parser); /* skip 'var' if any */
+        }
+        if (match_id(parser, name) != NULL) {
+            check_class_attr(parser, c, name);
+            be_class_member_bind(parser->vm, c, name, bfalse);
+            class_static_assignment_expr(parser, e, name);
+
+            while (match_skip(parser, OptComma)) { /* ',' */
+                if (match_id(parser, name) != NULL) {
+                    check_class_attr(parser, c, name);
+                    be_class_member_bind(parser->vm, c, name, bfalse);
+                    class_static_assignment_expr(parser, e, name);
+                } else {
+                    parser_error(parser, "class static error");
+                }
+            }
+        } else {
+            parser_error(parser, "class static error");
+        }
+    }
 }
 
 static void class_inherit(bparser *parser, bexpdesc *e)
@@ -1436,7 +1487,7 @@ static void class_block(bparser *parser, bclass *c, bexpdesc *e)
         switch (next_type(parser)) {
         case KeyVar: classvar_stmt(parser, c); break;
         case KeyStatic: classstatic_stmt(parser, c, e); break;
-        case KeyDef: classdef_stmt(parser, c); break;
+        case KeyDef: classdef_stmt(parser, c, bfalse); break;
         case OptSemic: scan_next_token(parser); break;
         default: push_error(parser,
                 "unexpected token '%s'", token2str(parser));
@@ -1642,7 +1693,7 @@ static void statement(bparser *parser)
     case OptSemic: scan_next_token(parser); break; /* empty statement */
     default: expr_stmt(parser); break;
     }
-    be_assert(parser->finfo->freereg == be_list_count(parser->finfo->local));
+    be_assert(parser->finfo->freereg >= be_list_count(parser->finfo->local));
 }
 
 static void stmtlist(bparser *parser)

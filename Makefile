@@ -1,23 +1,27 @@
-CFLAGS    = -Wall -Wextra -std=c99 -pedantic-errors -O2
-LIBS      = -lm
-TARGET    = berry
-CC       ?= gcc
-MKDIR     = mkdir
-LFLAGS    = 
+CFLAGS      = -Wall -Wextra -std=c99 -pedantic-errors -O2
+DEBUG_FLAGS = -O0 -g -DBE_DEBUG
+TEST_FLAGS  = $(DEBUG_FLAGS) --coverage -fno-omit-frame-pointer -fsanitize=address -fsanitize=undefined
+LIBS        = -lm
+TARGET      = berry
+CC          = gcc
+MKDIR       = mkdir
+LFLAGS      =
+PREFIX      = /usr/local
+BINDIR      = $(PREFIX)/bin
 
-INCPATH   = src default
-SRCPATH   = src default
-GENERATE  = generate
-CONFIG    = default/berry_conf.h
-COC		  = tools/coc/coc
-CONST_TAB = $(GENERATE)/be_const_strtab.h
-MAKE_COC  = $(MAKE) -C tools/coc
+INCPATH     = src default
+SRCPATH     = src default
+GENERATE    = generate
+CONFIG      = default/berry_conf.h
+COC         = tools/coc/coc
+CONST_TAB   = $(GENERATE)/be_const_strtab.h
 
 ifeq ($(OS), Windows_NT) # Windows
     CFLAGS    += -Wno-format # for "%I64d" warning
     LFLAGS    += -Wl,--out-implib,berry.lib # export symbols lib for dll linked
     TARGET    := $(TARGET).exe
-    COC       := $(COC).exe
+    PYTHON    ?= python # only for windows and need python3
+    COC       := $(PYTHON) $(COC)
 else
     CFLAGS    += -DUSE_READLINE_LIB
     LIBS      += -lreadline -ldl
@@ -30,14 +34,8 @@ endif
 ifneq ($(V), 1)
     Q=@
     MSG=@echo
-    MAKE_COC += -s Q=$(Q)
 else
     MSG=@true
-endif
-
-ifeq ($(TEST), 1)
-    CFLAGS += -fprofile-arcs -ftest-coverage
-    LFLAGS += -fprofile-arcs -ftest-coverage
 endif
 
 SRCS     = $(foreach dir, $(SRCPATH), $(wildcard $(dir)/*.c))
@@ -49,11 +47,11 @@ INCFLAGS = $(foreach dir, $(INCPATH), -I"$(dir)")
 
 all: $(TARGET)
 
-debug: CFLAGS += -O0 -g -DBE_DEBUG
+debug: CFLAGS += $(DEBUG_FLAGS)
 debug: all
 
-test: CFLAGS += --coverage
-test: LFLAGS += --coverage
+test: CFLAGS += $(TEST_FLAGS)
+test: LFLAGS += $(TEST_FLAGS)
 test: all
 	$(MSG) [Run Testcases...]
 	$(Q) ./testall.be
@@ -73,24 +71,21 @@ sinclude $(DEPS)
 
 $(OBJS): $(CONST_TAB)
 
-$(CONST_TAB): $(COC) $(GENERATE) $(SRCS) $(CONFIG)
+$(CONST_TAB): $(GENERATE) $(SRCS) $(CONFIG)
 	$(MSG) [Prebuild] generate resources
-	$(Q) $(COC) -i $(SRCPATH) -c $(CONFIG) -o $(GENERATE)
+	$(Q) $(COC)  -o $(GENERATE) $(SRCPATH) -c $(CONFIG)
 
 $(GENERATE):
 	$(Q) $(MKDIR) $(GENERATE)
 
-$(COC):
-	$(MSG) [Make] coc
-	$(Q) $(MAKE_COC)
-
 install:
-	cp $(TARGET) /usr/local/bin
+	mkdir -p $(DESTDIR)$(BINDIR)
+	cp $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
 
 uninstall:
-	$(RM) /usr/local/bin/$(TARGET)
+	$(RM) $(DESTDIR)$(BINDIR)/$(TARGET)
 
-prebuild: $(COC) $(GENERATE)
+prebuild: $(GENERATE)
 	$(MSG) [Prebuild] generate resources
 	$(Q) $(COC) -o $(GENERATE) $(SRCPATH) -c $(CONFIG)
 	$(MSG) done
@@ -98,5 +93,4 @@ prebuild: $(COC) $(GENERATE)
 clean:
 	$(MSG) [Clean...]
 	$(Q) $(RM) $(OBJS) $(DEPS) $(GENERATE)/* berry.lib
-	$(Q) $(MAKE_COC) clean
 	$(MSG) done

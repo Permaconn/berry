@@ -15,6 +15,7 @@ extern "C" {
 #include "be_object.h"
 #include "be_gc.h"
 #include "be_map.h"
+#include "be_list.h"
 #include "be_class.h"
 #include "be_string.h"
 #include "be_module.h"
@@ -26,15 +27,51 @@ extern "C" {
     .type = (_t),                                               \
     .marked = GC_CONST
 
+#define be_define_const_str_weak(_name, _s, _len)               \
+    const bcstring be_const_str_##_name = {                     \
+        .next = NULL,                                           \
+        .type = BE_STRING,                                      \
+        .marked = GC_CONST,                                     \
+        .extra = 0,                                             \
+        .slen = _len,                                           \
+        .hash = 0,                                              \
+        .s = _s                                                 \
+    }
+
 #define be_const_key(_str, _next) {                             \
     .v.c = &be_const_str_##_str,                                \
     .type = BE_STRING,                                          \
     .next = (uint32_t)(_next) & 0xFFFFFF                        \
 }
 
+/* try to use the predefined string in strtab, but don't create an instance if none is present */
+/* the behavior is exactly the same as `be_const_key()` but it not detected by coc */
+#define be_const_key_weak(_str, _next) {                        \
+    .v.c = &be_const_str_##_str,                                \
+    .type = BE_STRING,                                          \
+    .next = (uint32_t)(_next) & 0xFFFFFF                        \
+}
+
+#define be_const_key_literal(_str, _next) {                     \
+    .v.c = be_str_literal(#_str),                                \
+    .type = BE_STRING,                                          \
+    .next = (uint32_t)(_next) & 0xFFFFFF                        \
+}
+
+#define be_const_key_int(_i, _next) {                           \
+    .v.i = _i,                                                  \
+    .type = BE_INT,                                             \
+    .next = (uint32_t)(_next) & 0xFFFFFF                        \
+}
+
 #define be_const_func(_func) {                                  \
     .v.nf = (_func),                                            \
-    .type = BE_FUNCTION                                         \
+    .type = BE_NTVFUNC                                          \
+}
+
+#define be_const_static_func(_func) {                           \
+    .v.nf = (_func),                                            \
+    .type = BE_NTVFUNC | BE_STATIC                              \
 }
 
 #define be_const_nil() {                                        \
@@ -73,7 +110,7 @@ extern "C" {
 }
 
 #define be_const_comptr(_val) {                                 \
-    .v.c = (const void*)(_val),                                       \
+    .v.c = (const void*)(_val),                                 \
     .type = BE_COMPTR                                           \
 }
 
@@ -87,9 +124,29 @@ extern "C" {
     .type = BE_CLOSURE                                          \
 }
 
+#define be_const_static_closure(_closure) {                     \
+    .v.c = &(_closure),                                         \
+    .type = BE_CLOSURE | BE_STATIC                              \
+}
+
 #define be_const_module(_module) {                              \
     .v.c = &(_module),                                          \
     .type = BE_MODULE                                           \
+}
+
+#define be_const_simple_instance(_instance) {                   \
+    .v.c = (_instance),                                         \
+    .type = BE_INSTANCE                                         \
+}
+
+#define be_const_map(_map) {                                    \
+    .v.c = &(_map),                                             \
+    .type = BE_MAP                                              \
+}
+
+#define be_const_list(_list) {                                  \
+    .v.c = &(_list),                                            \
+    .type = BE_LIST                                             \
 }
 
 #define be_define_const_map_slots(_name)                        \
@@ -164,6 +221,17 @@ const bntvmodule be_native_module(_module) = {                  \
     .info.name = _module_name                                   \
 }
 
+/* only instances with no super and no sub instance are supported */
+/* primarily for `list` and `map`*/
+#define be_nested_simple_instance(_class_ptr, _members)         \
+  & (const binstance)  {                                        \
+    be_const_header(BE_INSTANCE),                               \
+    .super = NULL,                                              \
+    .sub = NULL,                                                \
+    ._class = (bclass*) _class_ptr,                             \
+    .members = _members                                         \
+  }
+
 #define be_nested_map(_size, _slots)                            \
   & (const bmap) {                                              \
     be_const_header(BE_MAP),                                    \
@@ -172,6 +240,40 @@ const bntvmodule be_native_module(_module) = {                  \
     .size = _size,                                              \
     .count = _size                                              \
   }
+
+#define be_nested_list(_size, _items)                           \
+  & (const blist) {                                             \
+    be_const_header(BE_LIST),                                   \
+    .count = _size,                                             \
+    .capacity = _size,                                          \
+    .data = _items                                              \
+  }
+
+#define be_nested_str(_name_)                                   \
+  {                                                             \
+    { .s=((bstring*)&be_const_str_##_name_) },                  \
+    BE_STRING                                                   \
+  }
+
+/* variant that does not trigger strtab */
+#define be_nested_str_weak(_name_)                              \
+  {                                                             \
+    { .s=((bstring*)&be_const_str_##_name_) },                  \
+    BE_STRING                                                   \
+  }
+
+#define be_nested_str_literal(_name_)                           \
+  {                                                             \
+    { .s=(be_nested_const_str(_name_, _hash, sizeof(_name_)-1 ))\
+    },                                                          \
+    BE_STRING                                                   \
+  }
+
+#define be_str_literal(_str)                                    \
+  be_nested_const_str(_str, 0, sizeof(_str)-1 )
+
+#define be_str_weak(_str)                                       \
+  (bstring*) &be_const_str_##_str
 
 #define be_nested_string(_str, _hash, _len)                     \
   {                                                             \
@@ -189,15 +291,45 @@ const bntvmodule be_native_module(_module) = {                  \
 
 #else
 
+#define be_define_const_str_weak(_name, _s, _len)               \
+const bcstring be_const_str_##_name = {                         \
+    NULL,                                                       \
+    BE_STRING,                                                  \
+    GC_CONST,                                                   \
+    0,                                                          \
+    _len,                                                       \
+    0,                                                          \
+    _s                                                          \
+}
+
 #define be_const_key(_str, _next) {                             \
     bvaldata(&be_const_str_##_str),                             \
         BE_STRING,                                              \
         uint32_t((_next)&0xFFFFFF)                              \
 }
 
+/* try to use the predefined string in strtab, but don't create an instance if none is present */
+/* the behavior is exactly the same as `be_const_key()` but it not detected by coc */
+#define be_const_key_weak(_str, _next) {                        \
+    bvaldata(&be_const_str_##_str),                             \
+        BE_STRING,                                              \
+        uint32_t((_next)&0xFFFFFF)                              \
+}
+
+#define be_const_key_int(_i, _next) {                           \
+    bvaldata(i),                                                \
+        BE_INT,                                                 \
+        uint32_t((_next)&0xFFFFFF)                              \
+}
+
 #define be_const_func(_func) {                                  \
     bvaldata(_func),                                            \
-    BE_FUNCTION                                                 \
+    BE_NTVFUNC                                                  \
+}
+
+#define be_const_static_func(_func) {                           \
+    bvaldata(_func),                                            \
+    BE_NTVFUNC | BE_STATIC                                      \
 }
 
 #define be_const_nil() {                                        \
@@ -250,6 +382,11 @@ const bntvmodule be_native_module(_module) = {                  \
     BE_CLOSURE                                                  \
 }
 
+#define be_const_static_closure(_closure) {                     \
+    bvaldata(&(_closure)),                                      \
+    BE_CLOSURE | BE_STATIC                                      \
+}
+
 #define be_const_module(_module) {                              \
     bvaldata(&(_module)),                                       \
     BE_MODULE                                                   \
@@ -284,15 +421,18 @@ const bvector _name = {                                         \
     (void*)_data, (void*)(_data + (_size) - 1)                  \
 }
 
-#define be_define_const_native_module(_module, _init)           \
-const bntvmodule be_native_module(_module) = {                  \
+#define be_define_const_native_module(_module)                  \
+const bntvmodule be_native_module_##_module = {                 \
     #_module,                                                   \
     0, 0,                                                       \
-    (bmodule*)&(m_lib##_module),                                \
-    _init                                                       \
+    (bmodule*)&(m_lib##_module)                                 \
 }
 
 #endif
+
+/* provide pointers to map and list classes for solidified code */
+extern const bclass be_class_list;
+extern const bclass be_class_map;
 
 #ifdef __cplusplus
 }

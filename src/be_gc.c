@@ -40,6 +40,7 @@ void be_gc_init(bvm *vm)
 {
     vm->gc.usage = sizeof(bvm);
     be_gc_setsteprate(vm, 200);
+    be_gc_init_memory_pools(vm);
 }
 
 void be_gc_deleteall(bvm *vm)
@@ -138,7 +139,8 @@ static void mark_gray(bvm *vm, bgcobject *obj)
 {
     if (obj && gc_iswhite(obj) && !gc_isconst(obj)) {
         gc_setgray(obj);
-        switch (var_type(obj)) {
+        be_assert(!var_isstatic(obj));
+        switch (var_primetype(obj)) {
         case BE_STRING: gc_setdark(obj); break; /* just set dark */
         case BE_CLASS: link_gray(vm, cast_class(obj)); break;
         case BE_PROTO: link_gray(vm, cast_proto(obj)); break;
@@ -171,7 +173,7 @@ static void mark_map(bvm *vm, bgcobject *obj)
         while ((node = be_map_next(map, &iter)) != NULL) {
             bmapkey *key = &node->key;
             bvalue *val = &node->value;
-            if (be_isgctype((signed char)key->type)) {
+            if (be_isgcobj(key)) {
                 mark_gray(vm, var_togc(key));
             }
             mark_gray_var(vm, val);
@@ -348,7 +350,7 @@ static void free_instance(bvm *vm, bgcobject *obj)
 
 static void free_object(bvm *vm, bgcobject *obj)
 {
-    switch (obj->type) {
+    switch (var_primetype(obj)) {
     case BE_STRING: free_lstring(vm, obj); break; /* long string */
     case BE_CLASS: be_free(vm, obj, sizeof(bclass)); break;
     case BE_INSTANCE: free_instance(vm, obj); break;
@@ -368,7 +370,6 @@ static void premark_internal(bvm *vm)
     mark_gray(vm, gc_object(vm->module.loaded));
     mark_gray(vm, gc_object(vm->module.path));
     mark_gray(vm, gc_object(vm->ntvclass));
-    mark_gray(vm, gc_object(vm->registry));
 #if BE_USE_DEBUG_HOOK
     if (be_isgcobj(&vm->hook)) {
         mark_gray(vm, gc_object(var_toobj(&vm->hook)));
@@ -432,7 +433,8 @@ static void mark_unscanned(bvm *vm)
         bgcobject *obj = vm->gc.gray;
         if (obj && !gc_isdark(obj) && !gc_isconst(obj)) {
             gc_setdark(obj);
-            switch (var_type(obj)) {
+            be_assert(!var_isstatic(obj));
+            switch (var_primetype(obj)) {
             case BE_CLASS: mark_class(vm, obj); break;
             case BE_PROTO: mark_proto(vm, obj); break;
             case BE_INSTANCE: mark_instance(vm, obj); break;
@@ -497,6 +499,9 @@ static void delete_white(bvm *vm)
                 prev->next = next;
             }
             free_object(vm, node);
+#if BE_USE_PERF_COUNTERS
+            vm->counter_gc_freed++;
+#endif
         } else {
             gc_setwhite(node);
             prev = node;
@@ -537,10 +542,13 @@ void be_gc_collect(bvm *vm)
     if (vm->gc.status & GC_HALT) {
         return; /* the GC cannot run for some reason */
     }
-#if BE_USE_OBSERVABILITY_HOOK
-    if (vm->obshook != NULL)
-        (*vm->obshook)(vm, BE_OBS_GC_START, vm->gc.usage);
+#if BE_USE_PERF_COUNTERS
+    size_t slors_used_before_gc, slots_allocated_before_gc;
+    be_gc_memory_pools_info(vm, &slors_used_before_gc, &slots_allocated_before_gc);
+    vm->counter_gc_kept = 0;
+    vm->counter_gc_freed = 0;
 #endif
+    if (vm->obshook != NULL) (*vm->obshook)(vm, BE_OBS_GC_START, vm->gc.usage);
     /* step 1: set root-set reference objects to unscanned */
     premark_internal(vm); /* object internal the VM */
     premark_global(vm); /* global objects */
@@ -557,8 +565,14 @@ void be_gc_collect(bvm *vm)
     reset_fixedlist(vm);
     /* step 5: calculate the next GC threshold */
     vm->gc.threshold = next_threshold(vm->gc);
-#if BE_USE_OBSERVABILITY_HOOK
-    if (vm->obshook != NULL)
-        (*vm->obshook)(vm, BE_OBS_GC_END, vm->gc.usage);
+    be_gc_memory_pools(vm); /* free unsued memory pools */
+#if BE_USE_PERF_COUNTERS
+    size_t slors_used_after_gc, slots_allocated_after_gc;
+    be_gc_memory_pools_info(vm, &slors_used_after_gc, &slots_allocated_after_gc);
+    if (vm->obshook != NULL) (*vm->obshook)(vm, BE_OBS_GC_END, vm->gc.usage, vm->counter_gc_kept, vm->counter_gc_freed,
+                                            slors_used_before_gc, slots_allocated_before_gc,
+                                            slors_used_after_gc, slots_allocated_after_gc);
+#else
+    if (vm->obshook != NULL) (*vm->obshook)(vm, BE_OBS_GC_END, vm->gc.usage);
 #endif
 }

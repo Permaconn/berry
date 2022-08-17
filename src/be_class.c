@@ -7,13 +7,12 @@
 ********************************************************************/
 #include "be_class.h"
 #include "be_string.h"
-#include "be_vector.h"
 #include "be_map.h"
 #include "be_exec.h"
 #include "be_gc.h"
 #include "be_vm.h"
 #include "be_func.h"
-#include "be_var.h"
+#include "be_module.h"
 #include <string.h>
 
 #define check_members(vm, c)            \
@@ -40,10 +39,11 @@ bclass* be_newclass(bvm *vm, bstring *name, bclass *super)
 void be_class_compress(bvm *vm, bclass *c)
 {
     if (!gc_isconst(c) && c->members) {
-        be_map_release(vm, c->members); /* clear space */
+        be_map_compact(vm, c->members); /* clear space */
     }
 }
 
+/* Return the type of the class attribute, only used to check if the attribute already exists */
 int be_class_attribute(bvm *vm, bclass *c, bstring *attr)
 {
     for (; c; c = c->super) {
@@ -57,7 +57,7 @@ int be_class_attribute(bvm *vm, bclass *c, bstring *attr)
     return BE_NONE;
 }
 
-void be_member_bind(bvm *vm, bclass *c, bstring *name, bbool var)
+void be_class_member_bind(bvm *vm, bclass *c, bstring *name, bbool var)
 {
     bvalue *attr;
     set_fixed(name);
@@ -75,7 +75,7 @@ void be_member_bind(bvm *vm, bclass *c, bstring *name, bbool var)
     }
 }
 
-void be_method_bind(bvm *vm, bclass *c, bstring *name, bproto *p)
+void be_class_method_bind(bvm *vm, bclass *c, bstring *name, bproto *p, bbool is_static)
 {
     bclosure *cl;
     bvalue *attr;
@@ -87,9 +87,12 @@ void be_method_bind(bvm *vm, bclass *c, bstring *name, bproto *p)
     cl = be_newclosure(vm, p->nupvals);
     cl->proto = p;
     var_setclosure(attr, cl);
+    if (is_static) {
+        var_markstatic(attr);
+    }
 }
 
-void be_prim_method_bind(bvm *vm, bclass *c, bstring *name, bntvfunc f)
+void be_class_native_method_bind(bvm *vm, bclass *c, bstring *name, bntvfunc f)
 {
     bvalue *attr;
     set_fixed(name);
@@ -100,7 +103,7 @@ void be_prim_method_bind(bvm *vm, bclass *c, bstring *name, bntvfunc f)
     attr->type = MT_PRIMMETHOD;
 }
 
-void be_closure_method_bind(bvm *vm, bclass *c, bstring *name, bclosure *cl)
+void be_class_closure_method_bind(bvm *vm, bclass *c, bstring *name, bclosure *cl)
 {
     bvalue *attr;
     check_members(vm, c);
@@ -217,18 +220,18 @@ static binstance* newobject(bvm *vm, bclass *c)
 /* Instanciate new instance from stack with argc parameters */
 /* Pushes the constructor on the stack to be executed if a construtor is found */
 /* Returns true if a constructor is found */
-bbool be_class_newobj(bvm *vm, bclass *c, bvalue *reg, int argc, int mode)
+bbool be_class_newobj(bvm *vm, bclass *c, int pos, int argc, int mode)
 {
     bvalue init;
-    size_t pos = reg - vm->reg;
     binstance *obj = newobject(vm, c);  /* create empty object hierarchy from class hierarchy */
-    reg = vm->reg + pos - mode; /* the stack may have changed, mode=1 when class is instanciated from module #104 */
-    var_setinstance(reg, obj);
-    var_setinstance(reg + mode, obj);  /* copy to reg and reg+1 if mode==1 */
+    // reg = vm->reg + pos - mode; /* the stack may have changed, mode=1 when class is instanciated from module #104 */
+    var_setinstance(vm->reg + pos, obj);
+    var_setinstance(vm->reg + pos - mode, obj);  /* copy to reg and reg+1 if mode==1 */
     /* find constructor */
     obj = instance_member(vm, obj, str_literal(vm, "init"), &init);
     if (obj && var_type(&init) != MT_VARIABLE) {
         /* copy argv */
+        bvalue * reg;
         for (reg = vm->reg + pos + 1; argc > 0; --argc) {
             reg[argc] = reg[argc - 2];
         }
@@ -238,11 +241,6 @@ bbool be_class_newobj(bvm *vm, bclass *c, bvalue *reg, int argc, int mode)
     return bfalse;
 }
 
-/* Default empty constructor */
-static int default_init_native_method(bvm *vm) {
-    be_return_nil(vm);
-}
-
 /* Find instance member by name and copy value to `dst` */
 /* Do not look into virtual members */
 int be_instance_member_simple(bvm *vm, binstance *instance, bstring *name, bvalue *dst)
@@ -250,10 +248,11 @@ int be_instance_member_simple(bvm *vm, binstance *instance, bstring *name, bvalu
     int type;
     be_assert(name != NULL);
     binstance * obj = instance_member(vm, instance, name, dst);
-    type = var_type(dst);
-    if (obj && type == MT_VARIABLE) {
+    if (obj && var_type(dst) == MT_VARIABLE) {
         *dst = obj->members[dst->v.i];
     }
+    type = var_type(dst);
+    var_clearstatic(dst);
     return type;
 }
 
@@ -265,18 +264,19 @@ int be_instance_member(bvm *vm, binstance *instance, bstring *name, bvalue *dst)
 {
     int type;
     be_assert(name != NULL);
-    binstance * obj = instance_member(vm, instance, name, dst);
-    type = var_type(dst);
-    if (obj && type == MT_VARIABLE) {
+    binstance *obj = instance_member(vm, instance, name, dst);
+    if (obj && var_type(dst) == MT_VARIABLE) {
         *dst = obj->members[dst->v.i];
     }
+    type = var_type(dst);
     if (obj) {
+        var_clearstatic(dst);
         return type;
     } else {  /* if no method found, try virtual */
         /* if 'init' does not exist, create a virtual empty constructor */
         if (strcmp(str(name), "init") == 0) {
-            var_setntvfunc(dst, default_init_native_method);
-            return var_type(dst);
+            var_setntvfunc(dst, be_default_init_native_function);
+            return var_primetype(dst);
         } else {
             /* get method 'member' */
             obj = instance_member(vm, instance, str_literal(vm, "member"), vm->top);
@@ -292,9 +292,15 @@ int be_instance_member(bvm *vm, binstance *instance, bstring *name, bvalue *dst)
                     *dst = obj->members[dst->v.i];
                 }
                 type = var_type(dst);
-                if (type != BE_NIL) {
-                    return type;
+                if (type == BE_MODULE) {
+                    /* check if the module is named `undefined` */
+                    bmodule *mod = var_toobj(dst);
+                    if (strcmp(be_module_name(mod), "undefined") == 0) {
+                        return BE_NONE;     /* if the return value is module `undefined`, consider it is an error */
+                    }
                 }
+                    var_clearstatic(dst);
+                    return type;
             }
         }
     }
@@ -307,11 +313,8 @@ int be_class_member(bvm *vm, bclass *obj, bstring *name, bvalue *dst)
     be_assert(name != NULL);
     obj = class_member(vm, obj, name, dst);
     type = var_type(dst);
-    if (obj) {
-        return type;
-    } else {
-        return BE_NONE;
-    }
+    var_clearstatic(dst);
+    return obj ? type : BE_NONE;
 }
 
 bbool be_instance_setmember(bvm *vm, binstance *o, bstring *name, bvalue *src)
@@ -336,6 +339,20 @@ bbool be_instance_setmember(bvm *vm, binstance *o, bstring *name, bvalue *src)
             vm->top += 4;   /* prevent collection results */
             be_dofunc(vm, top, 3); /* call method 'member' */
             vm->top -= 4;
+            /* if return value is `false` or `undefined` signal an unknown attribute */
+            int type = var_type(vm->top);
+            if (type == BE_BOOL) {
+                bbool ret = var_tobool(vm->top);
+                if (!ret) {
+                    return bfalse;
+                }
+            } else if (type == BE_MODULE) {
+                /* check if the module is named `undefined` */
+                bmodule *mod = var_toobj(vm->top);
+                if (strcmp(be_module_name(mod), "undefined") == 0) {
+                    return bfalse;     /* if the return value is module `undefined`, consider it is an error */
+                }
+            }
             return btrue;
         }
     }
@@ -346,10 +363,12 @@ bbool be_class_setmember(bvm *vm, bclass *o, bstring *name, bvalue *src)
 {
     bvalue v;
     be_assert(name != NULL);
-    bclass * obj = class_member(vm, o, name, &v);
-    if (obj && !var_istype(&v, MT_VARIABLE)) {
-        be_map_insertstr(vm, obj->members, name, src);
-        return btrue;
+    if (!gc_isconst(o)) {
+        bclass * obj = class_member(vm, o, name, &v);
+        if (obj && !var_istype(&v, MT_VARIABLE)) {
+            be_map_insertstr(vm, obj->members, name, src);
+            return btrue;
+        }
     }
     return bfalse;
 }

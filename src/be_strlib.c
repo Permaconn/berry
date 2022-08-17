@@ -102,7 +102,7 @@ static bstring* sim2str(bvm *vm, bvalue *v)
     case BE_REAL:
         sprintf(sbuf, "%g", var_toreal(v));
         break;
-    case BE_CLOSURE: case BE_NTVCLOS: case BE_NTVFUNC:
+    case BE_CLOSURE: case BE_NTVCLOS: case BE_NTVFUNC: case BE_CTYPE_FUNC:
         sprintf(sbuf, "<function: %p>", var_toobj(v));
         break;
     case BE_CLASS:
@@ -246,29 +246,54 @@ const char* be_pushvfstr(bvm *vm, const char *format, va_list arg)
     return concat2(vm);
 }
 
+int be_char2hex(int c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    } else if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 0x0A;
+    } else if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 0x0A;
+    }
+    return -1;
+}
+
 /*******************************************************************
  * the function be_str2int():
- * >>-+------------+--+-----+----digits----><
- *    '-whitespace-'  +- + -+
- *                    '- - -'
+ * >>-+------------+--+--+-----+----digits-------+----------------><
+ *    '-whitespace-'  |  +- + -+                 |
+ *                    |  '- - -'                 |
+ *                    |                          |
+ *                    +- 0x or 0X ---hex_digits--+
+ * 
  *******************************************************************/
 BERRY_API bint be_str2int(const char *str, const char **endstr)
 {
     int c, sign;
     bint sum = 0;
     skip_space(str);
-    sign = c = *str++;
-    if (c == '+' || c == '-') {
-        c = *str++;
+    if (str[0] == '0' && (str[1] == 'x' || str[1] == 'X')) {
+        /* hex literal */
+        str += 2;       /* skip 0x or 0X */
+        while ((c = be_char2hex(*str++)) >= 0) {
+            sum = sum * 16 + c;
+        }
+        return sum;
+    } else {
+        /* decimal literal */
+        sign = c = *str++;
+        if (c == '+' || c == '-') {
+            c = *str++;
+        }
+        while (is_digit(c)) {
+            sum = sum * 10 + c - '0';
+            c = *str++;
+        }
+        if (endstr) {
+            *endstr = str - 1;
+        }
+        return sign == '-' ? -sum : sum;
     }
-    while (is_digit(c)) {
-        sum = sum * 10 + c - '0';
-        c = *str++;
-    }
-    if (endstr) {
-        *endstr = str - 1;
-    }
-    return sign == '-' ? -sum : sum;
 }
 
 /*******************************************************************
@@ -593,7 +618,7 @@ static int str_format(bvm *vm)
                 break;
             case 's': {
                 const char *s = be_tostring(vm, index);
-                int len = be_strlen(vm, 2);
+                int len = be_strlen(vm, index);
                 if (len > 100 && strlen(mode) == 2) {
                     be_pushvalue(vm, index);
                 } else {
@@ -802,6 +827,76 @@ static int str_toupper(bvm *vm) {
     return str_touplower(vm, btrue);
 }
 
+static int str_tr(bvm *vm)
+{
+    if (be_top(vm) == 3 && be_isstring(vm, 1) && be_isstring(vm, 2) && be_isstring(vm, 3)) {
+        const char *p, *s = be_tostring(vm, 1);
+        const char *t1 = be_tostring(vm, 2);
+        const char *t2 = be_tostring(vm, 3);
+        size_t len = (size_t)be_strlen(vm, 1);
+        char *buf, *q;
+        buf = be_pushbuffer(vm, len);
+        /* convert each char */
+        for (p = s, q = buf; *p != '\0'; ++p, ++q) {
+            const char *p1, *p2;
+            *q = *p;  /* default to no change */
+            for (p1=t1, p2=t2; *p1 != '\0'; ++p1) {
+                if (*p == *p1) {
+                    if (*p2) {
+                        *q = *p2;
+                    } else {
+                        q--;    /* remove this char */
+                        len--;
+                    }
+                    break;
+                }
+                if (*p2) { p2++; }
+            }
+        }
+        be_pushnstring(vm, buf, len); /* make escape string from buffer */
+        be_remove(vm, 2); /* remove buffer */
+        be_return(vm);
+    }
+    be_return_nil(vm);
+}
+
+static int str_replace(bvm *vm)
+{
+    int top = be_top(vm);
+    if (top >= 3 && be_isstring(vm, 1) && be_isstring(vm, 2) && be_isstring(vm, 3)) {
+        be_pushntvfunction(vm, &str_split);
+        be_pushvalue(vm, 1);
+        be_pushvalue(vm, 2);
+        be_call(vm, 2);
+        be_pop(vm, 2);
+
+        be_getmember(vm, -1, "concat");     /* get `concat` method of list */
+        be_pushvalue(vm, -2);               /* get list instance as first arg */
+        be_pushvalue(vm, 3);
+        be_call(vm, 2);
+        be_pop(vm, 2);
+        be_return(vm);
+    }
+    be_return_nil(vm);
+}
+
+static int str_escape(bvm *vm)
+{
+    int top = be_top(vm);
+    if (top >= 1 && be_isstring(vm, 1)) {
+        int quote = 'u';
+        if (top >= 2 && be_isbool(vm, 2)) {
+            if (be_tobool(vm, 1)) {
+                quote = 'x';
+            }
+        }
+        be_tostring(vm, 1);
+        be_toescape(vm, 1, quote);
+        be_pushvalue(vm, 1);
+        be_return(vm);
+    }
+    be_return_nil(vm);
+}
 
 #if !BE_USE_PRECOMPILED_OBJECT
 be_native_module_attr_table(string) {
@@ -818,6 +913,9 @@ be_native_module_attr_table(string) {
     be_native_module_function("char", str_char),
     be_native_module_function("tolower", str_tolower),
     be_native_module_function("toupper", str_toupper),
+    be_native_module_function("tr", str_tr),
+    be_native_module_function("escape", str_escape),
+    be_native_module_function("replace", str_replace),
 };
 
 be_define_native_module(string, NULL);
@@ -833,6 +931,9 @@ module string (scope: global, depend: BE_USE_STRING_MODULE) {
     char, func(str_char)
     tolower, func(str_tolower)
     toupper, func(str_toupper)
+    tr, func(str_tr)
+    escape, func(str_escape)
+    replace, func(str_replace)
 }
 @const_object_info_end */
 #include "../generate/be_fixed_string.h"

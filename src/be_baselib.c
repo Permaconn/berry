@@ -85,7 +85,7 @@ static bclass *find_class_closure(bclass *cl, bclosure *needle)
         if (members) {  /* only iterate if there are members */
             bmapiter iter = be_map_iter();
             while ((node = be_map_next(members, &iter)) != NULL) {
-                if (var_type(&node->value) == BE_CLOSURE) {  /* only native functions are considered */
+                if (var_primetype(&node->value) == BE_CLOSURE) {  /* only native functions are considered */
                     bclosure *clos_iter = var_toobj(&node->value);  /* retrieve the method's closure */
                     if (clos_iter == needle) {
                         /* we found the closure, we now know its class */
@@ -97,6 +97,25 @@ static bclass *find_class_closure(bclass *cl, bclosure *needle)
         cl = be_class_super(cl);  /* move to super class */
     }
     return NULL;  /* not found */
+}
+
+static bbool obj2int(bvm *vm, bvalue *var, bint *val)
+{
+    binstance *obj = var_toobj(var);
+    bstring *toint = str_literal(vm, "toint");
+    /* get operator method */
+    // TODO what if `tobool` is static
+    int type = be_instance_member(vm, obj, toint, vm->top);
+    if (type != BE_NONE && type != BE_NIL) {
+        vm->top[1] = *var; /* move self to argv[0] */
+        be_dofunc(vm, vm->top, 1); /* call method 'tobool' */
+        /* check the return value */
+        if (var_isint(vm->top)) {
+            *val = var_toint(vm->top);
+            return btrue;
+        }
+    }
+    return bfalse;
 }
 
 static int l_super(bvm *vm)
@@ -140,7 +159,7 @@ static int l_super(bvm *vm)
             if (size >= 2) {  /* need at least 2 stackframes: current (for super() native) and caller (the one we are interested in) */
                 bcallframe *caller = be_vector_at(&vm->callstack, size - 2);  /* get the callframe of caller */
                 bvalue *func = caller->func;  /* function object of caller */
-                if (var_type(func) == BE_CLOSURE) {  /* only useful if the caller is a Berry closure (i.e. not native) */
+                if (var_primetype(func) == BE_CLOSURE) {  /* only useful if the caller is a Berry closure (i.e. not native) */
                     bclosure *clos_ctx = var_toobj(func);  /* this is the closure we look for in the class chain */
                     base_class = find_class_closure(o->_class, clos_ctx);  /* iterate on current and super classes to find where the closure belongs */
                 }
@@ -234,7 +253,17 @@ static int l_int(bvm *vm)
         } else if (be_isbool(vm, 1)) {
             be_pushint(vm, be_tobool(vm, 1) ? 1 : 0);
         } else if (be_iscomptr(vm, 1)) {
-            be_pushint(vm, (int) be_tocomptr(vm, 1));
+            intptr_t p = (intptr_t) be_tocomptr(vm, 1);
+            be_pushint(vm, (int) p);
+        } else if (be_isinstance(vm, 1)) {
+            /* try to call `toint` method */
+            bvalue *v = be_indexof(vm, 1);
+            bint val;
+            if (obj2int(vm, v, &val)) {
+                be_pushint(vm, val);
+            } else {
+                be_return_nil(vm);
+            }
         } else {
             be_return_nil(vm);
         }
@@ -304,7 +333,6 @@ static int l_call(bvm *vm)
                 be_moveto(vm, top + 1, top + 1 + list_size);
                 be_moveto(vm, top, top + list_size);
 
-                be_refpush(vm, -2);
                 be_pushiter(vm, -1);
                 while (be_iter_hasnext(vm, -2)) {
                     be_iter_next(vm, -2);
@@ -313,7 +341,6 @@ static int l_call(bvm *vm)
                     be_pop(vm, 1);
                 }
                 be_pop(vm, 1);  /* remove iterator */
-                be_refpop(vm);
             }
             be_pop(vm, 2);
             arg_count = arg_count - 1 + list_size;
@@ -339,6 +366,17 @@ static int l_str(bvm *vm)
     }
     be_return(vm);
 }
+
+static int l_bool(bvm *vm)
+{
+    if (be_top(vm)) {
+        be_pushbool(vm, be_tobool(vm, 1));
+    } else {
+        be_pushbool(vm, bfalse);
+    }
+    be_return(vm);
+}
+
 
 static int l_size(bvm *vm)
 {
@@ -462,9 +500,10 @@ void be_load_baselib(bvm *vm)
 }
 
 /* call must be added later to respect order of builtins */
-void be_load_baselib_call(bvm *vm)
+void be_load_baselib_next(bvm *vm)
 {
     be_regfunc(vm, "call", l_call);
+    be_regfunc(vm, "bool", l_bool);
 }
 #else
 extern const bclass be_class_list;
@@ -497,6 +536,7 @@ vartab m_builtin (scope: local) {
     range, class(be_class_range)
     bytes, class(be_class_bytes)
     call, func(l_call)
+    bool, func(l_bool)
 }
 @const_object_info_end */
 #include "../generate/be_fixed_m_builtin.h"
